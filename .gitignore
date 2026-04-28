@@ -1,0 +1,13 @@
+*.txt
+*.loc
+*.toc
+*.synctex.gz
+*.aux
+*latexmk*
+*.log
+*.fls
+*.nav
+*.out
+*.snm
+*systemslogo*
+*logo-EP*

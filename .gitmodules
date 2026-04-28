@@ -1,0 +1,6 @@
+[submodule "bt-kinetix"]
+	path = bt-kinetix
+	url = https://github.com/TheAyos/bt-kinetix.git
+[submodule "bt-libero"]
+	path = bt-libero
+	url = https://github.com/TheAyos/bt-libero.git

@@ -1,0 +1,793 @@
+\documentclass[aspectratio=1610]{beamer}
+\usepackage{tikz}
+\usepackage{booktabs}
+\usepackage{graphicx}
+\usepackage{amsmath}
+\usepackage{appendixnumberbeamer}
+\usetheme{Madrid}
+\usecolortheme{default}
+
+% Figure path macros (relative to presentation directory)
+\newcommand{\kinetixfig}[1]{../report/sources/bt-kinetix/bt-kinetix/bt_experiments/final_plots/#1}
+\newcommand{\liberofig}[1]{../report/sources/bt-libero/final_plots/#1}
+\newcommand{\liberoablationfig}[1]{../report/sources/bt-libero/final_plots_vlash_d0_d4_d8_d16_over_steps/#1}
+
+\title[Asynchronous VLA Inference]
+{Bachelor Thesis}
+\subtitle{Understanding Asynchronous Inference Methods\\for Vision-Language-Action Models}
+\author[]
+{Ayoub Agouzoul\inst{1,2}}
+
+\institute[]
+{
+    \inst{1}%
+    \'Ecole polytechnique\\
+    \inst{2}%
+    ETH Z\"urich\\[0.5em]
+    \textit{Supervised by Professor Wenqi Jiang}
+}
+
+\date[March 27th, 2026]
+{January---March 2026}
+
+% TODO: add supervisor + referent instructor
+
+\logo{} % empty initially; activated after title slide
+\titlegraphic{%
+  \raisebox{-0.5\height}{\includegraphics[width=0.12\textwidth]{logo-EP-vertical.png}}%
+  \hspace{2em}%
+  \raisebox{-0.5\height}{\includegraphics[width=0.12\textwidth]{systemslogo-3colour-blacktext.pdf}}%
+}
+
+%------------------------------------------------------------
+% Table of contents at each section
+\AtBeginSection[]
+{
+  \begin{frame}
+    \frametitle{Outline}
+    \tableofcontents[currentsection]
+  \end{frame}
+}
+%------------------------------------------------------------
+
+\begin{document}
+
+\frame{\titlepage}
+
+% Activate logo for all subsequent slides
+\logo{\includegraphics[width=0.1\textwidth]{logo-EP-vertical.png}}
+
+%------------------------------------------------------------
+% OUTLINE
+%------------------------------------------------------------
+\begin{frame}
+\frametitle{Outline}
+\tableofcontents
+\end{frame}
+
+%============================================================
+\section{Motivation}
+%============================================================
+
+%------------------------------------------------------------
+\begin{frame}
+\frametitle{VLA Models Promise Generalist Robot Control}
+
+\textbf{Vision-Language-Action (VLA) models:}
+\begin{itemize}
+    \item Map camera images + language instructions $\rightarrow$ robot actions
+    \item Leverage pretrained vision-language representations
+    \item State-of-the-art: $\pi_0$, $\pi_{0.5}$, SmolVLA
+\end{itemize}
+
+\vspace{0.5em}
+\textbf{Action chunking} for efficient deployment:
+\begin{itemize}
+    \item Predict $H$ future actions in one forward pass (via flow matching)
+    \item Execute chunk while computing the next one (asynchronous)
+\end{itemize}
+
+\vspace{0.5em}
+\begin{alertblock}{Key problem}
+Large model $\rightarrow$ high inference latency $\rightarrow$ by the time actions are ready, the robot's state has changed
+\end{alertblock}
+
+\end{frame}
+
+%------------------------------------------------------------
+\begin{frame}
+\frametitle{Asynchronous Inference Creates Observation Staleness}
+
+\textbf{Inference delay} $d = \lfloor \delta / \Delta t \rfloor$:
+\begin{itemize}
+    \item $\delta$: wall-clock inference time
+    \item $\Delta t$: control period (e.g., 20\,ms at 50\,Hz)
+    \item First $d$ actions in each new chunk are \alert{already obsolete}
+\end{itemize}
+
+\vspace{0.5em}
+\textbf{Naive async execution causes:}
+\begin{itemize}
+    \item \textbf{Chunk boundary discontinuity} --- abrupt transitions, jitter
+    \item \textbf{Observation staleness} --- actions conditioned on outdated state
+    \item \textbf{Open-loop degradation} --- no correction during chunk lifetime
+\end{itemize}
+
+\vspace{0.5em}
+\begin{block}{How severe?}
+Cloud inference over 4G: $d = 13$ steps; edge GPU on-device: $d = 2$
+\end{block}
+
+\end{frame}
+
+%------------------------------------------------------------
+\begin{frame}
+\frametitle{Four Methods Address Staleness --- Which Works Best?}
+
+\begin{enumerate}
+    \item \textbf{IT-RTC:} Inpaints fresh actions at inference time (training-free)
+    \item \textbf{TT-RTC:} Simulates delays during training (zero inference overhead)
+    \item \textbf{VLASH:} Conditions on estimated future robot state
+    \item \textbf{A2C2:} Lightweight correction head for per-step residual fixes
+\end{enumerate}
+
+\vspace{0.5em}
+\textbf{Problem:} Developed independently, incompatible codebases and protocols
+
+\vspace{0.5em}
+\begin{block}{Our contribution}
+\begin{itemize}
+    \item \textbf{Two unified codebases} for fair side-by-side comparison
+    \item \textbf{Systematic evaluation} on Kinetix and LIBERO (delays up to $d = 20$)
+    \item \textbf{Cost analysis and practical guidelines} for choosing a method
+\end{itemize}
+\end{block}
+
+\end{frame}
+
+%============================================================
+\section{Background}
+%============================================================
+
+%------------------------------------------------------------
+\begin{frame}
+\frametitle{How Do VLA Models Generate Actions?}
+
+\textbf{Architecture (e.g., SmolVLA, $\pi_0$):}
+\begin{itemize}
+    \item \textbf{VLM backbone:} Processes images + language $\rightarrow$ features
+    \item \textbf{Action expert:} Generates continuous action chunk via flow matching
+\end{itemize}
+
+\vspace{0.3em}
+\textbf{Flow matching} for action generation:
+\begin{itemize}
+    \item Start from noise $\epsilon \sim \mathcal{N}(0, I)$
+    \item Iteratively denoise through $n$ Euler steps (typically 5--10)
+    \item $A^{\tau + 1/n} = A^{\tau} + \frac{1}{n} v_\theta(A^{\tau}, o, \tau)$
+\end{itemize}
+
+\vspace{0.3em}
+\textbf{Action chunking:}
+\begin{itemize}
+    \item Predict $H$ future actions: $A_t = (a_t, \ldots, a_{t+H-1})$
+    \item Execute $s \leq H$ actions, then replan with fresh observation
+\end{itemize}
+
+\end{frame}
+
+%------------------------------------------------------------
+\begin{frame}
+\frametitle{IT-RTC and TT-RTC Fix Chunk Boundary Discontinuity}
+
+\begin{columns}
+\column{0.5\textwidth}
+\textbf{IT-RTC} (inference-time):
+\begin{itemize}
+    \item Treats committed prefix as constraint
+    \item Soft mask + pseudoinverse VJP guidance during denoising
+    \item \alert{No retraining needed}
+    \item Overhead: $3\times$ FLOPs on denoising
+\end{itemize}
+
+\column{0.5\textwidth}
+\textbf{TT-RTC} (training-time):
+\begin{itemize}
+    \item Simulates random delays $d \sim p(d)$ during training
+    \item Per-token flow timesteps: prefix at $\tau{=}1$, postfix sampled
+    \item Loss computed only on postfix
+    \item \alert{Zero inference overhead}
+\end{itemize}
+\end{columns}
+
+\vspace{0.5em}
+\begin{block}{Key difference}
+IT-RTC approximates via linearized VJP guidance; TT-RTC learns the prefix-conditioned distribution directly
+\end{block}
+
+\end{frame}
+
+%------------------------------------------------------------
+\begin{frame}
+\frametitle{VLASH and A2C2 Target Different Failure Modes}
+
+\begin{columns}
+\column{0.5\textwidth}
+\textbf{VLASH} (future-state-aware):
+\begin{itemize}
+    \item Estimates robot state at execution time:
+    $\hat{s}_{t+\Delta} = s_t + \sum_k a_{t+k}^{\text{prev}}$
+    \item Conditions policy on future state
+    \item Temporal-offset augmentation during training
+    \item Needs dynamics model or simulator
+\end{itemize}
+
+\column{0.5\textwidth}
+\textbf{A2C2} (residual correction):
+\begin{itemize}
+    \item Lightweight correction head runs every control step
+    \item $a^{\text{exec}} = a^{\text{base}} + \Delta a$
+    \item Uses \emph{latest} observation
+    \item \alert{Plug-in:} no base policy retraining
+    \item Can combine with other methods
+\end{itemize}
+\end{columns}
+
+\vspace{0.5em}
+\begin{block}{Each method targets a different failure mode}
+IT-RTC \& TT-RTC $\rightarrow$ chunk discontinuity, \quad VLASH $\rightarrow$ staleness, \quad A2C2 $\rightarrow$ open-loop degradation
+\end{block}
+
+\end{frame}
+
+%============================================================
+\section{Experimental Setup}
+%============================================================
+
+%------------------------------------------------------------
+\begin{frame}
+\frametitle{Unified Codebases Enable Fair Comparison}
+
+\textbf{Problem:} Each method in separate codebase with different dependencies
+
+\vspace{0.5em}
+\begin{columns}
+\column{0.5\textwidth}
+\textbf{bt-kinetix} (JAX):
+\begin{itemize}
+    \item All 4 methods + naive baseline
+    \item MLP-Mixer backbone ($\sim$310K params)
+    \item Chunk sizes $H \in \{16, 30\}$
+    \item 2048 parallel rollouts per config
+\end{itemize}
+
+\column{0.5\textwidth}
+\textbf{bt-libero} (PyTorch / LeRobot):
+\begin{itemize}
+    \item SmolVLA base policy (604M params)
+    \item All 4 methods + naive baseline
+    \item Unified evaluation harness
+    \item 4 LIBERO task suites (40 tasks)
+\end{itemize}
+\end{columns}
+
+\vspace{0.5em}
+\begin{block}{Key benefit}
+Same base policy, data, and evaluation protocol $\rightarrow$ performance differences attributable to method, not implementation
+\end{block}
+
+\end{frame}
+
+%------------------------------------------------------------
+\begin{frame}
+\frametitle{Two Benchmarks Cover Different Scales and Tasks}
+
+\begin{columns}
+\column{0.5\textwidth}
+\textbf{Kinetix} (2D physics):
+\begin{itemize}
+    \item 10 dynamic environments
+    \item Throwing, catching, balancing, locomotion
+    \item Symbolic observations ($\text{dim} = 679$)
+    \item Fast JAX simulation on GPU
+    \item Delays $d = 0, \ldots, 15$
+\end{itemize}
+
+\column{0.5\textwidth}
+\textbf{LIBERO} (manipulation):
+\begin{itemize}
+    \item 40 language-conditioned tasks
+    \item 7-DoF Franka Panda arm
+    \item RGB images + proprioception
+    \item SmolVLA (production-scale VLA)
+    \item Delays $d = 0, \ldots, 20$
+\end{itemize}
+\end{columns}
+
+\vspace{0.5em}
+\textbf{Research questions:}
+\begin{enumerate}
+    \item[\textbf{RQ1}] How do methods compare as delay $d$ increases?
+    \item[\textbf{RQ2}] Do training-based methods generalize beyond $d_{\max}$?
+    \item[\textbf{RQ3}] What are the training and inference costs of each method?
+\end{enumerate}
+
+\end{frame}
+
+%------------------------------------------------------------
+\begin{frame}
+\frametitle{Real-World Delays Motivate Extended Evaluation Range}
+
+\begin{table}
+\centering
+\small
+\begin{tabular}{l l r r}
+\toprule
+\textbf{Scenario} & \textbf{Configuration} & \textbf{Latency $\delta$} & \textbf{Delay $d$} \\
+\midrule
+Consumer GPU (local) & RTX 4090 & 31\,ms & 1 \\
+Edge GPU (on-device) & Jetson Thor & 53\,ms & 2 \\
+Edge server (4G) & B100 + 4G & 73\,ms & 3 \\
+Cloud server (slow) & B100 + 4G + cloud & 273\,ms & \alert{13} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\small Based on $\pi_0$ latency estimates (Jiang et~al.), 50\,Hz controller
+
+\vspace{0.5em}
+\begin{alertblock}{Prior work only evaluated $d \leq 4$}
+We extend to $d = 15$ (Kinetix) and $d = 20$ (LIBERO) to cover realistic deployment scenarios
+\end{alertblock}
+
+\end{frame}
+
+%============================================================
+\section{Results}
+%============================================================
+
+%------------------------------------------------------------
+\begin{frame}
+\frametitle{A2C2 Leads; TT-RTC Surpasses IT-RTC ($H = 16$)}
+
+\begin{center}
+    \includegraphics[width=0.95\textwidth,height=0.68\textheight,keepaspectratio]{\kinetixfig{c16/combined_2x2.pdf}}
+\end{center}
+
+\vspace{-0.5em}
+\small
+\textbf{Kinetix, 10 envs, 2048 rollouts each.} A2C2 (pink) leads, above 90\% even at $d = 8$. VLASH outperforms RTC methods. TT-RTC $d_{\max}{=}8$ surpasses IT-RTC at higher delays. Naive (red) drops below 40\%.
+
+\end{frame}
+
+%------------------------------------------------------------
+\begin{frame}
+\frametitle{IT-RTC Degrades at High Delays ($H = 30$)}
+
+\begin{center}
+    \includegraphics[width=0.95\textwidth,height=0.68\textheight,keepaspectratio]{\kinetixfig{c30/combined_2x2.pdf}}
+\end{center}
+
+\vspace{-0.5em}
+\small
+\textbf{Extended to $d = 15$.} A2C2 still leads. \alert{IT-RTC falls close to naive} --- VJP approximation degrades as prefix-to-postfix ratio grows. TT-RTC remains robust. VLASH $d_{\max}{=}15$ hurts low-delay performance ($\sim$10\% drop).
+
+\end{frame}
+
+%------------------------------------------------------------
+\begin{frame}
+\frametitle{TT-RTC Generalizes Stably; VLASH Trades Low for High Delay}
+
+\begin{center}
+    \includegraphics[width=0.95\textwidth,height=0.68\textheight,keepaspectratio]{\kinetixfig{ttrtc_vlash_c30_d5_vs_d9_vs_d16/combined_2x2.pdf}}
+\end{center}
+
+\vspace{-0.5em}
+\small
+\textbf{$d_{\max}$ ablation ($H = 30$).}
+TT-RTC variants evolve very similarly regardless of $d_{\max}$.
+VLASH shows a clear \alert{low-delay vs.\ high-delay trade-off}: wider $d_{\max}$ helps at high $d$ but hurts near $d = 0$.
+
+\end{frame}
+
+%------------------------------------------------------------
+\begin{frame}
+\frametitle{Results Extend to Production VLA Models on LIBERO}
+
+\vspace{-0.5em}
+\begin{center}
+    \includegraphics[width=0.70\textwidth,height=0.55\textheight,keepaspectratio]{\liberofig{success_vs_delay_action_50_averaged.pdf}}
+\end{center}
+
+\vspace{-0.5em}
+\small
+SmolVLA (604M params) on 40 LIBERO tasks, $s = 50$, delays $d \in \{0, \ldots, 20\}$
+
+\end{frame}
+
+%------------------------------------------------------------
+\begin{frame}
+\frametitle{VLA-Scale Cost Analysis Reveals Surprising Trade-offs}
+
+\begin{table}
+\centering
+\footnotesize
+\begin{tabular}{l r r}
+\toprule
+\textbf{Method} & \textbf{Per-chunk GFLOPs} & \textbf{Ratio} \\
+\midrule
+Naive / TT-RTC / VLASH & 551.0 & $1.00\times$ \\
+IT-RTC & 663.8 & $1.20\times$ \\
+A2C2 ($s{=}50$) & \alert{961.7} & \alert{$1.75\times$} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\vspace{0.3em}
+\textbf{Why IT-RTC is only $1.2\times$ (not $3\times$)?}
+\begin{itemize}
+    \item Vision encoder prefill = \textbf{89.8\%} of chunk cost (494.6 / 551.0\,GFLOPs)
+    \item IT-RTC's $3\times$ overhead applies only to the denoising loop (10\% of cost)
+\end{itemize}
+
+\vspace{0.3em}
+\textbf{Why A2C2 is the most expensive?}
+\begin{itemize}
+    \item 50 ResidualTransformer corrections $\times$ 8.21\,GFLOPs each = 410.7\,GFLOPs
+\end{itemize}
+
+\vspace{0.3em}
+\begin{block}{Latency still matters}
+IT-RTC triples the \emph{sequential} denoising bottleneck $\rightarrow$ avoid for real-time
+\end{block}
+
+\end{frame}
+%============================================================
+\section{Conclusion}
+%============================================================
+
+%------------------------------------------------------------
+\begin{frame}
+\frametitle{Summary: No Single Winner, But Clear Trade-offs}
+
+\textbf{Key findings:}
+\begin{itemize}
+    \item All four methods substantially outperform naive async execution
+    \item A2C2's per-step correction most effective ($>$90\% at $d{=}0...8$ on Kinetix)
+    \item IT-RTC degrades at high delays and long chunks ($H = 30$)
+    \item TT-RTC is the most \alert{robust}: stable across $d_{\max}$, zero overhead
+    \item VLASH has a clear low-delay vs.\ high-delay trade-off with $d_{\max}$
+\end{itemize}
+
+\vspace{0.5em}
+\textbf{Practical guidelines:}
+\begin{itemize}
+    \item No retraining possible? $\rightarrow$ \textbf{IT-RTC} (drop-in, but degrades at high $d$)
+    \item Fine-tuning feasible? $\rightarrow$ \textbf{TT-RTC} (best robustness--cost trade-off)
+    \item Dynamics model available? $\rightarrow$ \textbf{VLASH} (tune $d_{\max}$ carefully)
+    \item Want per-step corrections? $\rightarrow$ \textbf{A2C2} (plug-in, combinable)
+\end{itemize}
+
+\end{frame}
+
+%------------------------------------------------------------
+\begin{frame}
+\frametitle{Limitations}
+
+\begin{itemize}
+    \item VLASH on LIBERO uses ground-truth future states (simulator), not available in real deployment
+    \item Hyperparameters from original papers, not tuned per benchmark
+    \item Inference delay $d$ fixed per episode; real deployments have variable latency
+    \item Limited GPU budget: not all method combinations and chunk sizes explored
+    \item Walltime measurements on Kinetix not representative of real-world robot deployment
+\end{itemize}
+
+\end{frame}
+
+%------------------------------------------------------------
+\begin{frame}
+\frametitle{Thank You --- Questions?}
+
+\begin{center}
+\Large
+\textbf{Questions and Discussion}
+\end{center}
+
+\vspace{1em}
+\textbf{Main takeaways:}
+\begin{enumerate}
+    \item Observation staleness is a critical VLA deployment bottleneck
+    \item No single method wins everywhere --- the right choice depends on deployment constraints
+    \item Unified evaluation reveals trade-offs invisible when methods are compared separately
+\end{enumerate}
+
+\vspace{1em}
+\begin{block}{Code available}
+\url{https://github.com/TheAyos/async-vla-inference}
+\end{block}
+
+\begin{block}{Acknowledgments}
+Prof.\ Wenqi Jiang, Prof.\ Sergio Mover, ETH Systems Group, \'Ecole polytechnique
+\end{block}
+
+\end{frame}
+
+%============================================================
+% APPENDIX (backup slides for questions)
+%============================================================
+\appendix
+
+%------------------------------------------------------------
+\begin{frame}
+\frametitle{Appendix: Deployment Scenario Delay Mapping}
+
+\begin{table}
+\centering
+\small
+\begin{tabular}{l l r r}
+\toprule
+\textbf{Scenario} & \textbf{Configuration} & \textbf{Latency $\delta$} & \textbf{Delay $d$} \\
+\midrule
+Datacenter GPU (local) & B100, no network & 3.2\,ms & 0 \\
+Consumer GPU (local) & RTX 4090, no network & 31.1\,ms & 1 \\
+Edge GPU (on-device) & Jetson Thor, no network & 52.6\,ms & 2 \\
+Edge server (WiFi\,7) & B100 + WiFi\,7 & 8.4\,ms & 0 \\
+Edge server (5G) & B100 + 5G & 27.8\,ms & 1 \\
+Edge server (4G) & B100 + 4G & 73.0\,ms & 3 \\
+Cloud server (fast) & B100 + wired + fast cloud & 23.4\,ms & 1 \\
+Cloud server (slow) & B100 + 4G + slow cloud & 273.4\,ms & 13 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\small Based on $\pi_0$ latency estimates from Jiang et~al., assuming 50\,Hz control frequency ($\Delta t = 20$\,ms).
+
+\end{frame}
+
+
+%------------------------------------------------------------
+\begin{frame}
+\frametitle{Appendix: Baseline Sanity Check --- $d = 0$ Performance}
+
+\vspace{-0.5em}
+\begin{center}
+    \includegraphics[width=\textwidth,height=0.36\textheight,keepaspectratio]{\kinetixfig{c16/baseline_comparison.pdf}}
+
+    \vspace{0.1em}
+
+    \includegraphics[width=\textwidth,height=0.36\textheight,keepaspectratio]{\kinetixfig{c30/baseline_comparison.pdf}}
+\end{center}
+
+\vspace{-0.5em}
+\small All methods achieve comparable $d = 0$ performance. Minor variations for VLASH with high $d_{\max}$.
+
+\end{frame}
+
+%------------------------------------------------------------
+\begin{frame}
+\frametitle{Appendix: Cross-Chunk-Size Comparison (Naive, IT-RTC, A2C2)}
+
+\begin{center}
+    \includegraphics[width=0.95\textwidth,height=0.72\textheight,keepaspectratio]{\kinetixfig{c16_vs_c30_naive_itrtc_residual/combined_2x2.pdf}}
+\end{center}
+
+\small $H = 16$ consistently outperforms $H = 30$ --- longer chunks impose intrinsic prediction difficulty.
+
+\end{frame}
+
+%------------------------------------------------------------
+\begin{frame}
+\frametitle{Appendix: Cross-Chunk-Size Comparison (TT-RTC)}
+
+\begin{center}
+    \includegraphics[width=0.95\textwidth,height=0.72\textheight,keepaspectratio]{\kinetixfig{c16_vs_c30_ttrtc/combined_2x2.pdf}}
+\end{center}
+
+\small TT-RTC's delay robustness transfers across chunk sizes when $d_{\max}$ is set appropriately.
+
+\end{frame}
+
+%------------------------------------------------------------
+\begin{frame}
+\frametitle{Appendix: Cross-Chunk-Size Comparison (VLASH)}
+
+\begin{center}
+    \includegraphics[width=0.95\textwidth,height=0.72\textheight,keepaspectratio]{\kinetixfig{c16_vs_c30_vlash/combined_2x2.pdf}}
+\end{center}
+
+\small VLASH's state rollforward accuracy is more sensitive to chunk size than TT-RTC's prefix conditioning.
+
+\end{frame}
+
+%------------------------------------------------------------
+\begin{frame}
+\frametitle{Appendix: Episode Efficiency ($H = 16$)}
+
+\begin{center}
+    \includegraphics[width=0.95\textwidth,height=0.72\textheight,keepaspectratio]{\kinetixfig{c16/episode_lengths_vs_delay_and_horizon_2x2.pdf}}
+\end{center}
+
+\small A2C2 achieves the lowest time-to-solve among solved episodes. Naive requires the most steps.
+
+\end{frame}
+
+%------------------------------------------------------------
+\begin{frame}
+\frametitle{Appendix: LIBERO Per-Suite Success Rate Breakdown}
+
+\begin{center}
+    \includegraphics[width=\textwidth,height=0.78\textheight,keepaspectratio]{\liberofig{success_vs_delay_action_50.pdf}}
+\end{center}
+
+\end{frame}
+
+%------------------------------------------------------------
+\begin{frame}
+\frametitle{Appendix: LIBERO Per-Suite Episode Length}
+
+\begin{center}
+    \includegraphics[width=\textwidth,height=0.78\textheight,keepaspectratio]{\liberofig{solved_ep_length_vs_delay_action_50.pdf}}
+\end{center}
+
+\end{frame}
+
+%------------------------------------------------------------
+\begin{frame}
+\frametitle{Appendix: VLASH Training Ablation on LIBERO}
+
+\begin{center}
+    \includegraphics[width=0.75\textwidth,height=0.68\textheight,keepaspectratio]{\liberoablationfig{success_vs_delay_action_30_averaged.pdf}}
+\end{center}
+
+\small VLASH variants with $d_{\max} \in \{0, 4, 8, 16\}$ at multiple training checkpoints (2k--5k steps), execution horizon $s = 30$.
+
+\end{frame}
+
+%------------------------------------------------------------
+\begin{frame}
+\frametitle{Appendix: Kinetix Inference FLOPs per Method}
+
+\begin{table}
+\centering
+\small
+\begin{tabular}{l l r r}
+\toprule
+\textbf{Method} & \textbf{Per-chunk FLOPs} & \textbf{MFLOPs} & \textbf{Ratio} \\
+\midrule
+Naive     & $N_s \cdot F_{\text{fwd}}$ & 235 & $1.0\times$ \\
+IT-RTC    & $3 N_s \cdot F_{\text{fwd}}$ & 707 & $3.0\times$ \\
+TT-RTC    & $N_s \cdot F_{\text{fwd}}$ & 235 & $1.0\times$ \\
+VLASH     & $N_s \cdot F_{\text{fwd}}$ (+ env sim) & 235 & $1.0\times$ \\
+A2C2      & $N_s \cdot F_{\text{fwd}} + s \cdot F_{\text{res}}$ & $235 + 0.62s$ & $\approx 1.02\times$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\small $C{=}16$, $N_s{=}5$ Euler steps, $F_{\text{fwd}} \approx 47.1$\,MFLOPs, $F_{\text{res}} \approx 0.62$\,MFLOPs.
+
+On Kinetix (no vision encoder), IT-RTC's $3\times$ overhead is a true $3\times$. At VLA scale, the expensive vision prefill amortizes it to only $1.2\times$.
+
+\end{frame}
+
+%------------------------------------------------------------
+\begin{frame}
+\frametitle{Appendix: SmolVLA FLOPs Breakdown (LIBERO)}
+
+\begin{table}
+\centering
+\small
+\begin{tabular}{l r}
+\toprule
+\textbf{Component} & \textbf{FLOPs} \\
+\midrule
+SmolVLA prefill ($F_{\text{pre}}$) & 494.6\,GFLOPs \\
+SmolVLA denoising step ($F_{\text{ds}}$) & 5.64\,GFLOPs \\
+SmolVLA full chunk ($F_{\text{pre}} + 10 F_{\text{ds}}$) & 551.0\,GFLOPs \\
+\midrule
+ResidualTransformer forward ($F_{\text{res}}^L$) & 8.21\,GFLOPs \\
+\midrule
+SmolVLA total parameters & 604.9\,M \\
+ResidualTransformer (total / trainable) & 32.0\,M / 20.8\,M \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\textbf{Key insight:} Vision encoder prefill = \textbf{89.8\%} of total chunk cost. The denoising loop (where IT-RTC's overhead applies) is only $\sim$10\%.
+
+\end{frame}
+
+%------------------------------------------------------------
+\begin{frame}
+\frametitle{Appendix: Measured LIBERO Inference Latency}
+
+\begin{table}
+\centering
+\small
+\begin{tabular}{l r r r r}
+\toprule
+\textbf{Method} & \textbf{Mean (ms)} & \textbf{P95 (ms)} & \textbf{Hz} & \textbf{Ratio} \\
+\midrule
+Naive & 405.2 & 407.5 & 2.47 & $1.00\times$ \\
+TT-RTC & 402.7 & 404.9 & 2.48 & $0.99\times$ \\
+IT-RTC & 469.7 & 488.6 & 2.13 & $1.16\times$ \\
+A2C2 (serial) & 412.4 & 417.2 & 2.42 & $1.02\times$ \\
+A2C2 residual only & 7.27 & 7.35 & 137.5 & $0.02\times$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\small RTX 3090, SmolVLA, batch size 1, 100 timed iterations
+
+\vspace{0.3em}
+\textbf{Key takeaways:}
+\begin{itemize}
+    \item TT-RTC indistinguishable from naive (402.7 vs.\ 405.2\,ms)
+    \item IT-RTC +15.9\% latency (2.47 $\rightarrow$ 2.13\,Hz) --- slowest method
+    \item A2C2 residual head cheap in isolation (7.27\,ms), serial path close to naive
+\end{itemize}
+
+\end{frame}
+
+%------------------------------------------------------------
+\begin{frame}
+\frametitle{Appendix: Break-Even Analysis (TT-RTC vs.\ IT-RTC)}
+
+\textbf{When does TT-RTC's training investment pay off?}
+\[
+N^* = \frac{C_{\text{train}}^{\text{TT-RTC}}}{\Delta C_{\text{chunk}}} \quad\text{where}\quad \Delta C_{\text{chunk}} = C_{\text{chunk}}^{\text{IT-RTC}} - C_{\text{chunk}}^{\text{TT-RTC}}
+\]
+
+\vspace{0.3em}
+\textbf{LIBERO (SmolVLA):}
+\begin{itemize}
+    \item $C_{\text{train}}^{\text{TT-RTC}} \approx 1{,}310$\,PFLOPs (dominated by vision encoder forward)
+    \item $\Delta C_{\text{chunk}} = 20 F_{\text{ds}} = 112.8$\,GFLOPs (only denoising saved)
+    \item $N^* \approx 11.6$\,M chunks ($\approx 2.9$\,M episodes)
+\end{itemize}
+
+\vspace{0.3em}
+\textbf{In pure FLOPs:} IT-RTC is surprisingly efficient at VLA scale ($1.2\times$ overhead)
+
+\textbf{In latency:} IT-RTC triples the sequential denoising bottleneck $\rightarrow$ \textbf{avoid for real-time}
+
+\end{frame}
+
+%------------------------------------------------------------
+\begin{frame}
+\frametitle{Appendix: Flow Matching for Action Generation}
+
+\textbf{Interpolant:} $A^\tau = (1 - \tau)\epsilon + \tau A_0$, \quad $\epsilon \sim \mathcal{N}(0, I)$
+
+\vspace{0.3em}
+\textbf{Training loss:}
+\[
+\mathcal{L}_{\text{FM}} = \mathbb{E}_{\tau, \epsilon}\left[\|v_\theta(A^\tau, o, \tau) - (A_0 - \epsilon)\|^2\right]
+\]
+
+\vspace{0.3em}
+\textbf{Inference} (Euler integration from noise):
+\[
+A^{\tau + 1/n} = A^\tau + \frac{1}{n}v_\theta(A^\tau, o, \tau)
+\]
+
+\vspace{0.3em}
+\textbf{Key properties:}
+\begin{itemize}
+    \item Deterministic straight-line trajectories (vs.\ stochastic diffusion)
+    \item Generates full action chunk in parallel (no autoregressive tokens)
+    \item Used by $\pi_0$, $\pi_{0.5}$, SmolVLA, and Kinetix policies
+\end{itemize}
+
+\end{frame}
+
+%------------------------------------------------------------
+\begin{frame}
+    \frametitle{Appendix: Per-Environment Kinetix Breakdown ($H = 16$)}
+    
+    \begin{center}
+        \includegraphics[width=\textwidth,height=0.80\textheight,keepaspectratio]{\kinetixfig{c16/per_environment_breakdown.pdf}}
+    \end{center}
+    
+    \end{frame}    
+
+\end{document}
