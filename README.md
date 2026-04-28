@@ -36,7 +36,7 @@ This work would not have been possible without the support and contributions of 
 
 - I am sincerely grateful to my supervisor, **Prof. Wenqi Jiang**, for his guidance, patience, and feedback throughout this project.
 - I thank the **ETH Systems Group** for hosting me, providing access to the GPU resources used for all experiments, and for the welcoming research environment.
-- I thank **École polytechnique** (my home institution) and **ETH Zürich** (my host institution) for making this exchange semester and bachelor thesis possible.
+- I thank **École polytechnique** and **ETH Zürich** for the academic and administrative support that enabled this work.
 
 This work stands entirely on the shoulders of remarkable open-source releases. I am deeply grateful to the authors and maintainers of the following projects, which the codebases in this repository are built on:
 
